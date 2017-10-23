@@ -1,6 +1,20 @@
-library(data.table)
-library(maps)
-library(ggplot2)
+suppressPackageStartupMessages({
+  library(data.table)
+  library(ggplot2)
+  library(rgdal)
+  library(raster)
+  library(sp)
+  library(gstat)
+  library(dplyr) # for "glimpse"
+  library(scales) # for "comma"
+  library(magrittr)
+  library(automap)
+  library(rgeos)
+  library(maptools)
+})
+
+# Required To Enable Polygon clipping
+gpclibPermit()
 
 # Load the station listing with their lats, and longs
 stations <- data.table(read.csv(file = 'stations.csv', header = FALSE))
@@ -11,39 +25,48 @@ dps <- data.table(read.csv(file='1093638.csv'))
 dps$RANGE <- dps$TMAX - dps$TMIN
 
 # Group Them by station, and get the mean of the range
-grouped <- dps[, mean(RANGE), by = STATION]
-colnames(grouped) <- c("STATION", "AVGTRANGE")
+grouped <- dps[, mean(RANGE), by =STATION]
+colnames(grouped) <- c("STATION", "avgtrange")
+grouped <- as.data.frame(grouped)
+grouped[is.na(grouped)] <- 0
 
 # Merge Stations and Groups
 locs <- merge(grouped, stations, by="STATION")
+locs <- as.data.frame(locs)
+coordinates(locs) <- c('LONG', 'LAT')
+crs(locs) <- '+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0'
 
-# GET LOCS MIN MAX
-lat_min <- min(locs$LAT)
-lat_max <- max(locs$LAT)
-lng_min <- min(locs$LONG)
-lng_max <- max(locs$LONG)
+# Generate Spatial Points to put everything
+us <- raster::getData('GADM', country = 'US', level = 1)
+pa <- us[us$NAME_1 == "Pennsylvania",]
+pa <- spTransform(pa, CRS('+proj=merc'))
+locs.grid <- makegrid(pa, cellsize = 5000)
+locs.grid <- SpatialPoints(locs.grid, proj4string = CRS(proj4string(pa)))
+locs.grid <- locs.grid[pa,]
 
-# GET MAP BOUND
-states <- map_data('state')
-pa <- subset(states, region %in% 'pennsylvania')
+# Transform Regular Locs to mercerter
+locs <- spTransform(locs, CRS('+proj=merc'))
 
-ditch_the_axes <- theme(
-  axis.text = element_blank(),
-  axis.line = element_blank(),
-  axis.ticks = element_blank(),
-  panel.border = element_blank(),
-  panel.grid = element_blank(),
-  axis.title = element_blank()
-)
+# Kriege, to interpolate it
+locs.krieged <- autoKrige(avgtrange ~ 1, locs, locs.grid)
+locs.kr.df <- as.data.frame(locs.krieged$krige_output)
 
-state_outline <- ggplot(data = pa) + 
-  geom_polygon(aes(x = long, y = lat, group = group), fill = "palegreen", color = "black") +
-  coord_fixed(1.3) + ditch_the_axes
+# Clean up pa into a dataframe
+pa@data$id = rownames(pa@data)
+pa.points = fortify(pa, region="id")
+pa.df <- merge(pa.points, pa@data, by = "id")
 
-scatter_points <- ggplot(data=locs) +
-  geom_point(aes(x=LONG, y=LAT))
+locs.df <- as.data.frame(locs)
 
-gg <- ggplot() +
-  geom_polygon(data = pa, aes(x = long, y = lat, group = group)) +
-  geom_point(data = locs, aes(x=LONG, y=LAT))
+# Make Plot
+ggplot() +
+  geom_tile(data=locs.kr.df,aes(x=x1,y=x2,fill=var1.pred)) +
+  coord_equal() +
+  scale_fill_gradient(low = "blue", high="red") +
+  geom_point(data=locs.df, aes(x=LONG,y=LAT)) +
+  geom_contour(data=locs.kr.df, aes(x=x1,y=x2,z=var1.pred)) +
+  geom_path(data=pa, aes(x=long,y=lat), color="black") +
+  xlab('Longitude') +
+  ylab('Latitude')
+
 

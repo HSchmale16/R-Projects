@@ -2,3 +2,11 @@
 .Rhistory
 .RData
 .Ruserdata
+
+# Generated Graphs and Such
+*.png
+*.pdf
+
+# Data
+*.csv
+*.rds
